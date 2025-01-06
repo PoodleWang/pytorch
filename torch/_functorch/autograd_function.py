@@ -1,5 +1,5 @@
 # mypy: allow-untyped-defs
-from typing import Any, NamedTuple, Tuple
+from typing import NamedTuple, Tuple
 
 import torch
 import torch.utils._pytree as pytree
@@ -368,15 +368,19 @@ def custom_function_call_vmap_helper(
 
 def custom_function_call_vmap_generate_rule(interpreter, autograd_function, *operands):
     unwrapped_operands, in_dims = unwrap_batched(operands, interpreter.level())
-    vmapped_function, get_out_dims = vmapify_autograd_function(
+    vmapped_function = vmapify_autograd_function(
         autograd_function, in_dims, interpreter.batch_size(), interpreter.randomness()
     )
-
     with interpreter.lower():
-        output = custom_function_call(vmapped_function, *unwrapped_operands)
+        outputs = custom_function_call(vmapped_function, *unwrapped_operands)
 
-    out_dims = get_out_dims()
-    return wrap_batched(output, out_dims, interpreter.level())
+    assert isinstance(outputs, tuple)
+    out_dims = outputs[-1]
+    if isinstance(out_dims, tuple):
+        outputs = outputs[:-1]
+    else:
+        outputs = outputs[0]
+    return wrap_batched(outputs, out_dims, interpreter.level())
 
 
 @custom_function_call.py_impl(TransformType.Functionalize)
@@ -387,29 +391,22 @@ def custom_function_call_functionalize(
 
 
 def vmapify_autograd_function(autograd_function, in_dims, batch_size, randomness):
-    # The following values are saved from the forward() and setup_context()
-    # and used in backward().
-    # Why do we save the values out here instead of on the ctx object?
-    # - out_dims: There's no way to retrieve this from forward()
-    # - input_shapes, saved_tensors_bdims: I'm a bit scared of nesting
-    #   vmap(vmap( but not completely sure if it is a problem. If we
-    #   assigned those fields to the ctx object, the worry is that they
-    #   get overwritten.
-    init_val = "not populated"
-    out_dims = init_val
-    input_shapes: Any = init_val
-    saved_tensors_bdims: Any = init_val
-
     def forward(*operands):
-        nonlocal out_dims
         outputs, out_dims = restore_vmap(
             autograd_function.forward, in_dims, batch_size, randomness
         )(*operands)
-        return outputs
+        if isinstance(outputs, torch.Tensor):
+            return outputs, out_dims
+        else:
+            return *outputs, out_dims
 
     def setup_context(ctx, inputs, outputs):
-        input_shapes_ = None
-        saved_tensors_bdims_ = None
+        out_dims = outputs[-1]
+        if isinstance(out_dims, tuple):
+            outputs_ = outputs[:-1]
+        else:
+            outputs_ = outputs[0]
+        key = id(Generated)
 
         def inner(inputs, outputs):
             # wrapped_ctx.save_for_backward will:
@@ -423,12 +420,16 @@ def vmapify_autograd_function(autograd_function, in_dims, batch_size, randomness
             # to the correct shape.
             # See NOTE: [Why can't we rely on autograd to reduce expanded gradients?]
             # for more details
-            nonlocal input_shapes_
             input_shapes_ = tuple(
                 inp.shape if isinstance(inp, torch.Tensor) else None for inp in inputs
             )
-            nonlocal saved_tensors_bdims_
-            saved_tensors_bdims_ = wrapped_ctx._pt_saved_tensors_bdims
+            if not hasattr(ctx, "input_shapes"):
+                ctx.input_shapes = {}
+            ctx.input_shapes.update({key: input_shapes_})
+
+            if not hasattr(ctx, "saved_tensors_bdims"):
+                ctx.saved_tensors_bdims = {}
+            ctx.saved_tensors_bdims.update({key: (wrapped_ctx._pt_saved_tensors_bdims)})
 
         # See NOTE: [Why do we need to run setup_context under a vmap?]
         restore_vmap(
@@ -436,16 +437,14 @@ def vmapify_autograd_function(autograd_function, in_dims, batch_size, randomness
             (in_dims, out_dims),
             batch_size,
             randomness,
-        )(inputs, outputs)
+        )(inputs, outputs_)
 
-        nonlocal input_shapes
-        input_shapes = input_shapes_
-        nonlocal saved_tensors_bdims
-        saved_tensors_bdims = saved_tensors_bdims_
+        if not hasattr(ctx, "out_dims"):
+            ctx.out_dims = {}
+        ctx.out_dims.update({key: out_dims})
 
     def jvp(ctx, *tangents):
-        assert out_dims != init_val
-        assert saved_tensors_bdims != init_val
+        key = id(Generated)
 
         def jvp_no_context(saved_tensors, tangents):
             wrapped_ctx = CtxWithSavedTensors(ctx, saved_tensors)
@@ -454,18 +453,31 @@ def vmapify_autograd_function(autograd_function, in_dims, batch_size, randomness
         tangent_in_dims = get_tangents_in_dims(in_dims, tangents)
         out_tangents, out_tangents_dims = restore_vmap(
             jvp_no_context,
-            (saved_tensors_bdims, tangent_in_dims),
+            (ctx.saved_tensors_bdims[key], tangent_in_dims),
             batch_size,
             randomness,
         )(ctx.saved_tensors, tangents)
 
-        result = reductify(out_tangents, out_tangents_dims, out_dims, batch_size)
-        return result
+        result = reductify(
+            out_tangents, out_tangents_dims, ctx.out_dims[key], batch_size
+        )
+        if isinstance(result, torch.Tensor):
+            return result, None
+        else:
+            return *result, None
 
     def backward(ctx, *grad_outputs):
-        assert out_dims != init_val
-        assert input_shapes != init_val
-        assert saved_tensors_bdims != init_val
+        key = id(Generated)
+        grad_outputs_ = grad_outputs[:-1]
+        grad_outputs_in_dims = ctx.out_dims[key]
+
+        if not isinstance(grad_outputs_in_dims, tuple):
+            grad_outputs_in_dims = (grad_outputs_in_dims,)
+
+        grad_outputs_in_dims = tuple(
+            in_dim if grad_output is not None else None
+            for grad_output, in_dim in zip(grad_outputs_, grad_outputs_in_dims)
+        )
 
         def backward_no_context(inputs):
             saved_tensors, grad_outputs = inputs
@@ -474,11 +486,13 @@ def vmapify_autograd_function(autograd_function, in_dims, batch_size, randomness
 
         grad_ins, grad_ins_dims = restore_vmap(
             backward_no_context,
-            ((saved_tensors_bdims, out_dims),),
+            ((ctx.saved_tensors_bdims[key], grad_outputs_in_dims),),
             batch_size,
             randomness,
-        )((ctx.saved_tensors, grad_outputs))
-        result = reductify(grad_ins, grad_ins_dims, in_dims, batch_size, input_shapes)
+        )((ctx.saved_tensors, grad_outputs_))
+        result = reductify(
+            grad_ins, grad_ins_dims, in_dims, batch_size, ctx.input_shapes[key]
+        )
         return result
 
     name = f"Vmapped{autograd_function.__name__}"
@@ -494,11 +508,7 @@ def vmapify_autograd_function(autograd_function, in_dims, batch_size, randomness
         },
     )
 
-    def get_out_dims():
-        assert out_dims != init_val
-        return out_dims
-
-    return Generated, get_out_dims
+    return Generated
 
 
 # tangents might be None, so we need to replace
