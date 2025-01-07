@@ -1002,6 +1002,9 @@ class TestPatternMatcher(TestPatternMatcherBase):
                 counters["inductor"]["qconv2d_weight_prepack_matcher_nodes"],
                 12 if int8_mixed_bf16 else 8,
             )
+            self.assertEqual(
+                counters["inductor"]["qconv2d_unary_lower_count"], 0 if TEST_ACL else 2
+            )
 
         self._test_common(
             mod,
@@ -1077,12 +1080,15 @@ class TestPatternMatcher(TestPatternMatcherBase):
             # 2. QConv2D Unary fusion in post-grad fusion pass * 2
             self.assertEqual(
                 counters["inductor"]["qconv2d_unary_matcher_count"],
-                0 if TEST_ACL else 2,
+                2,
+            )
+            self.assertEqual(
+                counters["inductor"]["qconv2d_unary_lower_count"], 0 if TEST_ACL else 2
             )
             if qconv2d_unary_matcher_nodes:
                 self.assertEqual(
                     counters["inductor"]["qconv2d_unary_matcher_nodes"],
-                    0 if TEST_ACL else qconv2d_unary_matcher_nodes,
+                    qconv2d_unary_matcher_nodes,
                 )
 
         self._test_common(
@@ -1503,7 +1509,10 @@ class TestPatternMatcher(TestPatternMatcherBase):
             )
             self.assertEqual(
                 counters["inductor"]["qconv2d_unary_matcher_count"],
-                0 if TEST_ACL else 3,
+                3,
+            )
+            self.assertEqual(
+                counters["inductor"]["qconv2d_unary_lower_count"], 0 if TEST_ACL else 4
             )
 
         self._test_common(
@@ -1674,11 +1683,14 @@ class TestPatternMatcher(TestPatternMatcherBase):
             #    [qconv2d_pointwise_default, quantize_per_tensor]
             self.assertEqual(
                 counters["inductor"]["qconv2d_unary_matcher_count"],
-                0 if TEST_ACL else 1,
+                1,
             )
             self.assertEqual(
                 counters["inductor"]["qconv2d_unary_matcher_nodes"],
-                0 if TEST_ACL else 2,
+                2,
+            )
+            self.assertEqual(
+                counters["inductor"]["qconv2d_unary_lower_count"], 0 if TEST_ACL else 1
             )
 
         self._test_common(
@@ -1723,7 +1735,10 @@ class TestPatternMatcher(TestPatternMatcherBase):
             #    [qconv2d_pointwise_default, relu, div_1, round_2, add_1, clamp_min_1, clamp_max_1, convert_element_type_2]
             self.assertEqual(
                 counters["inductor"]["qconv2d_unary_matcher_count"],
-                0 if TEST_ACL else 2,
+                2,
+            )
+            self.assertEqual(
+                counters["inductor"]["qconv2d_unary_lower_count"], 0 if TEST_ACL else 2
             )
 
         self._test_common(
@@ -2649,6 +2664,10 @@ class TestPatternMatcher(TestPatternMatcherBase):
                 )
                 self.assertEqual(
                     counters["inductor"]["qconv2d_unary_matcher_count"],
+                    1,
+                )
+                self.assertEqual(
+                    counters["inductor"]["qconv2d_unary_lower_count"],
                     0 if TEST_ACL else 1,
                 )
 
@@ -2744,7 +2763,10 @@ class TestPatternMatcher(TestPatternMatcherBase):
             )
             self.assertEqual(
                 counters["inductor"]["qconv2d_unary_matcher_count"],
-                0 if TEST_ACL else 2,
+                2,
+            )
+            self.assertEqual(
+                counters["inductor"]["qconv2d_unary_lower_count"], 0 if TEST_ACL else 2
             )
 
         self._test_common(
