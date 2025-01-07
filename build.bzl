@@ -294,6 +294,7 @@ _GENERATED_AUTOGRAD_PYTHON_CPP = [
     "torch/csrc/autograd/generated/python_torch_functions_1.cpp",
     "torch/csrc/autograd/generated/python_torch_functions_2.cpp",
     "torch/csrc/autograd/generated/python_variable_methods.cpp",
+    "torch/csrc/functionalization/generated/ViewMetaClassesPythonBinding.cpp"
 ]
 
 GENERATED_AUTOGRAD_PYTHON = _GENERATED_AUTOGRAD_PYTHON_HEADERS + _GENERATED_AUTOGRAD_PYTHON_CPP
